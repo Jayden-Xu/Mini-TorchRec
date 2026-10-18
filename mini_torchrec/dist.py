@@ -39,8 +39,10 @@ def lookup_allreduce(shard: RowShard, all_ids: torch.Tensor, meter: CommMeter):
 
     all_ids: [world * B]，所有 rank 上内容相同。返回 [world * B, D]。
     """
-    # TODO(你): _C.shard_lookup_forward + meter.all_reduce
-    raise NotImplementedError
+    
+    partial = _C.shard_lookup_forward(shard.weight, all_ids, shard.row_offset)
+    meter.all_reduce(partial)
+    return partial
 
 
 def lookup_alltoall(shard: RowShard, my_ids: torch.Tensor, meter: CommMeter):
