@@ -39,7 +39,7 @@ def lookup_allreduce(shard: RowShard, all_ids: torch.Tensor, meter: CommMeter):
 
     all_ids: [world * B]，所有 rank 上内容相同。返回 [world * B, D]。
     """
-    
+
     partial = _C.shard_lookup_forward(shard.weight, all_ids, shard.row_offset)
     meter.all_reduce(partial)
     return partial
@@ -56,7 +56,39 @@ def lookup_alltoall(shard: RowShard, my_ids: torch.Tensor, meter: CommMeter):
     #   3. all_to_all 发 id
     #   4. 对收到的 id 做本地 lookup（此时应该全部命中）
     #   5. all_to_all 把行发回去，用第 1 步的置换还原顺序
-    raise NotImplementedError
+
+    world = shard.world
+    D = shard.weight.shape[1]
+    device = my_ids.device
+
+    # calculate owner, permutation and send_counts
+    owner = my_ids // shard.shard_size # e.g. [6, 1, 5] -> [1, 0, 1]
+    perm = torch.argsort(owner)
+    sorted_ids = my_ids[perm]
+    send_counts = torch.bincount(owner, minlength=world)
+
+    # exchange count
+    recv_counts = torch.empty_like(send_counts)
+    meter.all_to_all_single(recv_counts, send_counts, [1] * world, [1] * world)
+
+    send_list = send_counts.tolist()
+    recv_list = recv_counts.tolist()
+
+    # exchange id
+    recv_ids = torch.empty(sum(recv_list), dtype=my_ids.dtype, device=device)
+    meter.all_to_all_single(recv_ids, sorted_ids, recv_list, send_list)
+
+    # lookup
+    rows = _C.shard_lookup_forward(shard.weight, recv_ids, shard.row_offset)
+
+    # exchange row and restore order
+    bank = torch.empty(my_ids.numel(), D, dtype=rows.dtype, device=device)
+    meter.all_to_all_single(bank, rows, send_list, recv_list)
+
+    out = torch.empty_like(bank)
+    out[perm] = bank
+    return out
+    
 
 
 def wire_bytes_allreduce(world, B, D):
