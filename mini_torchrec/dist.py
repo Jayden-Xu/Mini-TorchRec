@@ -93,11 +93,37 @@ def lookup_alltoall(shard: RowShard, my_ids: torch.Tensor, meter: CommMeter):
 
 def wire_bytes_allreduce(world, B, D):
     """方案 A 每个 rank 实际发送的字节数（按 ring AllReduce 推）。"""
-    # TODO(你)
-    raise NotImplementedError
+    FLOAT = 4
+
+    # AllReduce 的 buffer：全量 world*B 个 id 的输出 [world*B, D]
+    buffer_bytes = world * B * D * FLOAT
+
+    # ring 把 buffer 切成 world 块，每步每个 rank 给下一个 rank 发一块
+    chunk_bytes = buffer_bytes / world
+
+    # reduce-scatter：world-1 步，每个 rank 拿到一块的完整和
+    reduce_scatter = (world - 1) * chunk_bytes
+
+    # all-gather：world-1 步，把求好和的块转发给所有人
+    all_gather = (world - 1) * chunk_bytes
+
+    return round(reduce_scatter + all_gather)
 
 
 def wire_bytes_alltoall(world, B, D):
     """方案 B 每个 rank 实际发送的字节数（id 均匀分布下的期望）。"""
-    # TODO(你)
-    raise NotImplementedError
+    INT64, FLOAT = 8, 4
+
+    # 第 0 轮：给每个其他 rank 发 1 个 int64 计数
+    counts_bytes = (world - 1) * INT64
+
+    # 第 1 轮：id 均匀分布，有 (world-1)/world 的 id 不归本卡，要发出去
+    remote_ids = B * (world - 1) / world
+    ids_bytes = remote_ids * INT64
+
+    # 第 2 轮：发回的行数 = 从其他 rank 收到的 id 数。
+    # 每个其他 rank 平均发来 B/world 个，共 world-1 个 rank，期望也是 B*(world-1)/world
+    remote_rows = B / world * (world - 1)
+    rows_bytes = remote_rows * D * FLOAT
+
+    return round(counts_bytes + ids_bytes + rows_bytes)
